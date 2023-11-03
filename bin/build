@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 
 # fail fast
-#set -eo pipefail
-
-set -eu
+set -eo pipefail
 
 start_time=$(date +%s%N)
 
 # debug
-#set -x
+# set -x
 
 function error() {
   echo " !     $*" >&2
@@ -27,21 +25,20 @@ function indent() {
   esac
 }
 
-layers_dir="$1"
-env_dir="$2/env"
-plan_path="$3"
+layers_dir="$CNB_LAYERS_DIR"
+env_dir="$CNB_PLATFORM_DIR/env"
 
 if compgen -G "${env_dir}/*" > /dev/null; then
-  for var in ${env_dir}/*; do
-    declare "$(basename ${var})=$(<${var})"
+  for var in "${env_dir}"/*; do
+    declare "$(basename "${var}")=$(<"${var}")"
   done
 fi
 
 apt_layer=$layers_dir/apt
-mkdir -p $apt_layer
+mkdir -p "$apt_layer"
 
 # Store which STACK we are running on in the cache to bust the cache if it changes
-if [ -f $apt_layer/STACK ]; then
+if [ -f "$apt_layer/STACK" ]; then
   CACHED_STACK=$(cat "$apt_layer/STACK")
 else
   CACHED_STACK=$CNB_STACK_ID
@@ -61,12 +58,12 @@ case "$APT_VERSION" in
   *)         APT_FORCE_YES="--allow-downgrades --allow-remove-essential --allow-change-held-packages";;
 esac
 
-if [ -f $apt_layer/Aptfile ] && cmp -s Aptfile $apt_layer/Aptfile && [[ $CACHED_STACK == $CNB_STACK_ID ]] ; then
+if [ -f "$apt_layer/Aptfile" ] && cmp -s Aptfile "$apt_layer/Aptfile" && [[ $CACHED_STACK == "$CNB_STACK_ID" ]] ; then
   topic "Aptfile and stack look the same, reusing cache"
 else
   # Aptfile changed or does not exist or STACK changed
   topic "Detected Aptfile changes, flushing cache"
-  rm -rf $APT_CACHE_DIR
+  rm -rf "$APT_CACHE_DIR"
   mkdir -p "$APT_CACHE_DIR/archives/partial"
   mkdir -p "$APT_STATE_DIR/lists/partial"
   mkdir -p "$APT_SOURCELIST_DIR"   # make dir for sources
@@ -76,7 +73,7 @@ else
   # like>>    :repo:deb http://cz.archive.ubuntu.com/ubuntu artful main universe
   if grep -q -e "^:repo:" Aptfile; then
     topic "Adding custom repositories"
-    cat Aptfile | grep -s -e "^:repo:" | sed 's/^:repo:\(.*\)\s*$/\1/g' >> $APT_SOURCES
+    cat Aptfile | grep -s -e "^:repo:" | sed 's/^:repo:\(.*\)\s*$/\1/g' >> "$APT_SOURCES"
   fi
 
   APT_OPTIONS="-o debug::nolocking=true -o dir::cache=$APT_CACHE_DIR -o dir::state=$APT_STATE_DIR"
@@ -88,76 +85,94 @@ else
 
   for PACKAGE in $(cat Aptfile | grep -v -s -e '^#' | grep -v -s -e "^:repo:"); do
     if [[ $PACKAGE == *deb ]]; then
-      PACKAGE_NAME=$(basename $PACKAGE .deb)
+      PACKAGE_NAME=$(basename "$PACKAGE" .deb)
       PACKAGE_FILE=$APT_CACHE_DIR/archives/$PACKAGE_NAME.deb
 
       topic "Fetching $PACKAGE"
-      curl --silent --show-error --fail -L -z $PACKAGE_FILE -o $PACKAGE_FILE $PACKAGE 2>&1 | indent
+      curl --silent --show-error --fail -L -z "$PACKAGE_FILE" -o "$PACKAGE_FILE" "$PACKAGE" 2>&1 | indent
     else
       topic "Fetching .debs for $PACKAGE"
-      apt-get $APT_OPTIONS -y $APT_FORCE_YES -d install --reinstall $PACKAGE | indent
+      apt-get $APT_OPTIONS -y $APT_FORCE_YES -d install --reinstall "$PACKAGE" | indent
     fi
   done
 
   topic "Installing apt packages with dpkg"
   for DEB in $(ls -1 $APT_CACHE_DIR/archives/*.deb); do
-    echo "$(basename $DEB)" | indent
-    dpkg -x $DEB $apt_layer/
+    basename "$DEB" | indent
+    dpkg -x "$DEB" "$apt_layer/"
   done
 
-  topic "Writing profile script and environment variables"
-  exports_path=$apt_layer/.profile.d/000_apt.sh
-  mkdir -p $apt_layer/.profile.d
-  touch $exports_path
+  topic "Writing exec.d script and environment variables"
+
+  exports_path=$apt_layer/exec.d/000_apt.sh
+  mkdir -p "$apt_layer/exec.d"
+  touch "$exports_path"
+  chmod 755 "$exports_path"
+  cat << EOF > "$exports_path"
+#!/usr/bin/env bash
+set -eo pipefail
+
+echo "Loading apt package environment variables"
+
+cat << EOF >&3
+EOF
+
   apt_env_dir=$apt_layer/env
-  mkdir -p $apt_env_dir
+  mkdir -p "$apt_env_dir"
 
   path="$apt_layer/usr/bin"
   echo "PATH=$path" | indent
-  echo "export PATH=\"$path:\$PATH\"" >> $exports_path
-  echo -n "$path:$PATH" > $apt_env_dir/PATH.prepend
-  echo -n ":" > $apt_env_dir/PATH.delim
+  echo "PATH = \"$path:\$PATH\"" >> "$exports_path"
+  echo -n "$path:$PATH" > "$apt_env_dir/PATH.prepend"
+  echo -n ":" > "$apt_env_dir/PATH.delim"
 
   ld_library_path=$apt_layer/lib/x86_64-linux-gnu:$apt_layer/lib/i386-linux-gnu:$apt_layer/lib:$apt_layer/usr/lib/x86_64-linux-gnu:$apt_layer/usr/lib/i386-linux-gnu:$apt_layer/usr/lib
   echo "LD_LIBRARY_PATH=$ld_library_path" | indent
-  echo "export LD_LIBRARY_PATH=\"$ld_library_path:\$LD_LIBRARY_PATH\"" >> $exports_path
-  echo -n "$ld_library_path" > $apt_env_dir/LD_LIBRARY_PATH.prepend
-  echo -n ":" > $apt_env_dir/LD_LIBRARY_PATH.delim
+  echo "LD_LIBRARY_PATH = \"$ld_library_path:\$LD_LIBRARY_PATH\"" >> "$exports_path"
+  echo -n "$ld_library_path" > "$apt_env_dir/LD_LIBRARY_PATH.prepend"
+  echo -n ":" > "$apt_env_dir/LD_LIBRARY_PATH.delim"
 
   library_path=$ld_library_path
   echo "LIBRARY_PATH=$library_path" | indent
-  echo "export LIBRARY_PATH=\"$library_path:\$LIBRARY_PATH\"" >> $exports_path
-  echo -n "$library_path" > $apt_env_dir/LIBRARY_PATH.prepend
-  echo -n ":" > $apt_env_dir/LIBRARY_PATH.delim
+  echo "LIBRARY_PATH = \"$library_path:\$LIBRARY_PATH\"" >> "$exports_path"
+  echo -n "$library_path" > "$apt_env_dir/LIBRARY_PATH.prepend"
+  echo -n ":" > "$apt_env_dir/LIBRARY_PATH.delim"
 
   include_path=$apt_layer/usr/include:$apt_layer/usr/include/x86_64-linux-gnu
   echo "INCLUDE_PATH=$include_path" | indent
-  echo "export INCLUDE_PATH=\"$include_path:\$INCLUDE_PATH\"" >> $exports_path
-  echo -n "$include_path" > $apt_env_dir/INCLUDE_PATH.prepend
-  echo -n ":" > $apt_env_dir/INCLUDE_PATH.delim
+  echo "INCLUDE_PATH = \"$include_path:\$INCLUDE_PATH\"" >> "$exports_path"
+  echo -n "$include_path" > "$apt_env_dir/INCLUDE_PATH.prepend"
+  echo -n ":" > "$apt_env_dir/INCLUDE_PATH.delim"
 
   cpath="\$INCLUDE_PATH"
   echo "CPATH=$cpath" | indent
-  echo "export CPATH=\"$cpath\"" >> $exports_path
+  echo "CPATH = \"$cpath\"" >> "$exports_path"
   cp "$apt_env_dir"/INCLUDE_PATH.prepend "$apt_env_dir"/CPATH.prepend
-  echo -n ":" > $apt_env_dir/CPATH.delim
+  echo -n ":" > "$apt_env_dir/CPATH.delim"
 
   cpppath="\$INCLUDE_PATH"
   echo "CPPPATH=$cpppath" | indent
-  echo "export CPPPATH=\"$cpppath\"" >> $exports_path
+  echo "CPPPATH = \"$cpppath\"" >> "$exports_path"
   cp "$apt_env_dir"/INCLUDE_PATH.prepend "$apt_env_dir"/CPPPATH.prepend
-  echo -n ":" > $apt_env_dir/CPPPATH.delim
+  echo -n ":" > "$apt_env_dir/CPPPATH.delim"
 
   pkg_config_path=$apt_layer/usr/lib/x86_64-linux-gnu/pkgconfig:$apt_layer/usr/lib/i386-linux-gnu/pkgconfig:$apt_layer/usr/lib/pkgconfig
   echo "PKG_CONFIG_PATH=$pkg_config_path" | indent
-  echo "export PKG_CONFIG_PATH=\"$pkg_config_path:\$PKG_CONFIG_PATH\"" >> $exports_path
-  echo -n "$pkg_config_path" > $apt_env_dir/PKG_CONFIG_PATH.prepend
-  echo -n ":" > $apt_env_dir/PKG_CONFIG_PATH.delim
+  echo "PKG_CONFIG_PATH = \"$pkg_config_path:\$PKG_CONFIG_PATH\"" >> "$exports_path"
+  echo -n "$pkg_config_path" > "$apt_env_dir/PKG_CONFIG_PATH.prepend"
+  echo -n ":" > "$apt_env_dir/PKG_CONFIG_PATH.delim"
+
+  echo 'EOF' >> "$exports_path"
+  echo '' >> "$exports_path"
 fi
 
-echo "launch = true" > ${apt_layer}.toml
-echo "build = true" >> ${apt_layer}.toml
-echo "cache = true" >> ${apt_layer}.toml
+# write layer toml file
+cat << EOF > "${apt_layer}.toml"
+[types]
+  launch = true
+  build = true
+  cache = true
+EOF
 
 end_time=$(date +%s%N)
-echo "Elapsed time: $(( $(( $end_time - $start_time )) / 1000000 ))ms" | indent
+echo "Elapsed time: $(( $(( end_time - start_time )) / 1000000 ))ms" | indent
