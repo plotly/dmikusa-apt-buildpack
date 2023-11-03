@@ -16,7 +16,7 @@ Include a list of `apt` package names to be installed in a file named `Aptfile`;
 The buildpack automatically downloads and installs the packages when you run a build:
 
 ```
-$ pack build --buildpack fagiani/apt myapp
+$ pack build --buildpack dmikusa/apt myapp
 ```
 
 #### Aptfile
